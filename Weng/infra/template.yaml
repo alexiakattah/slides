@@ -1,0 +1,142 @@
+# Plano B ao console: cria tabela, Lambda, HTTP API e permissões de uma vez.
+# Rode scripts/empacotar.sh antes: o CodeUri aponta para o zip gerado por ele.
+# Os comandos estão no README.
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Corrida na Nuvem - API da demo ao vivo
+
+Parameters:
+  AdminToken:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Token exigido em /admin/start e /admin/reset. Gere um na hora, não salve no repositório.
+  TelaoOrigin:
+    Type: String
+    Default: http://localhost:8080
+    AllowedPattern: "^https?://[^/]+$"
+    Description: >-
+      Origem exata do telão, sem barra no final. O Beanstalk sem HTTPS usa http://.
+      Faça o primeiro deploy com o padrão e repita com a URL do Beanstalk.
+
+Resources:
+  Tabela:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-placar"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  # Criado aqui para sumir junto com a stack e não acumular custo de logs.
+  LogsDaLambda:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-api"
+      RetentionInDays: 7
+
+  # Privilégio mínimo: cada ação lista exatamente o recurso em que pode agir.
+  PapelDaLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: corrida-na-nuvem-minimo
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PlacarNoDynamoDB
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt Tabela.Arn
+              # A API Converse usa a permissão bedrock:InvokeModel.
+              - Sid: LocutorNoBedrock
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
+              - Sid: LogsNoCloudWatch
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LogsDaLambda.Arn
+
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      # Com CORS aqui, o API Gateway responde o preflight (OPTIONS) sozinho e ignora
+      # headers de CORS vindos da Lambda.
+      # A página do jogador é servida pelo próprio API Gateway e chama a mesma origem,
+      # então o navegador não aplica CORS a ela. Só o telão precisa estar na lista.
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref TelaoOrigin
+        AllowMethods:
+          - GET
+          - POST
+        AllowHeaders:
+          - x-admin-token
+
+  Funcao:
+    Type: AWS::Serverless::Function
+    DependsOn: LogsDaLambda
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      CodeUri: ../dist/api.zip
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Timeout: 10
+      MemorySize: 256
+      Role: !GetAtt PapelDaLambda.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref Tabela
+          ADMIN_TOKEN: !Ref AdminToken
+      Events:
+        PaginaJogador:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: GET
+            Path: /
+        Tap:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: POST
+            Path: /tap
+        Estado:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: GET
+            Path: /state
+        AdminStart:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: POST
+            Path: /admin/start
+        AdminReset:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: POST
+            Path: /admin/reset
+
+Outputs:
+  ApiUrl:
+    Description: Valor de API_URL no telão e endereço do jogador
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com"

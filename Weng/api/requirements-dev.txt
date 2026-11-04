@@ -1,0 +1,5 @@
+# Só para os testes locais. A Lambda não precisa de dependências: o boto3 já vem no runtime.
+# O nome não pode ser requirements.txt, senão o "sam build" empacotaria tudo isto.
+boto3
+moto[dynamodb]
+pytest

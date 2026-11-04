@@ -1,0 +1,15 @@
+dist/
+node_modules/
+__pycache__/
+.pytest_cache/
+.venv/
+.aws-sam/
+samconfig.toml
+.env
+*.zip
+# O estado do Terraform guarda o ADMIN_TOKEN em texto puro.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+infra/terraform/.build/

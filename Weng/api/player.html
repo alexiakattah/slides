@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0B0D11">
+<title>Corrida na Nuvem</title>
+<style>
+  :root {
+    --fundo: #0B0D11;
+    --superficie: #1A1E26;
+    --laranja: #FF9900;
+    --teal: #00A4A6;
+    --texto: #FFFFFF;
+    --apagado: #A9B0BC;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--fundo);
+    color: var(--texto);
+    font-family: Arial, Helvetica, sans-serif;
+    /* Sem seleção de texto, menu de contexto ou zoom com toques rápidos. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    overscroll-behavior: none;
+  }
+  .tela {
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+    gap: 12px;
+  }
+  [hidden] { display: none !important; }
+
+  /* Escolha do time */
+  h1 { font-size: 28px; color: var(--laranja); }
+  .instrucao { font-size: 18px; color: var(--apagado); }
+  .times { flex: 1; display: grid; grid-template-rows: repeat(4, 1fr); gap: 12px; }
+  .time {
+    border: 2px solid var(--teal);
+    border-radius: 16px;
+    background: var(--superficie);
+    color: var(--texto);
+    font: bold 28px Arial, Helvetica, sans-serif;
+    cursor: pointer;
+  }
+  .time:active { background: var(--teal); }
+
+  /* Corrida */
+  .topo { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .nome-time { font-size: 26px; font-weight: bold; color: var(--laranja); }
+  .tempo { font-size: 26px; font-weight: bold; font-variant-numeric: tabular-nums; }
+  .aviso { min-height: 24px; font-size: 18px; color: var(--apagado); text-align: center; }
+  .botao {
+    flex: 1;
+    border: 0;
+    border-radius: 24px;
+    background: var(--laranja);
+    color: var(--fundo);
+    font: bold 64px Arial, Helvetica, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    cursor: pointer;
+    touch-action: none;
+  }
+  .botao small { font-size: 24px; font-weight: bold; font-variant-numeric: tabular-nums; }
+  .botao.pressionado { background: #FFB84D; }
+  .botao:disabled { background: var(--superficie); color: var(--apagado); }
+  .trocar {
+    border: 0;
+    background: none;
+    color: var(--apagado);
+    font: 16px Arial, Helvetica, sans-serif;
+    text-decoration: underline;
+    padding: 8px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<section class="tela" id="tela-times">
+  <h1>Corrida na Nuvem</h1>
+  <p class="instrucao">Escolha a sua Região da AWS:</p>
+  <div class="times">
+    <button class="time" data-time="sp">São Paulo</button>
+    <button class="time" data-time="va">Virgínia</button>
+    <button class="time" data-time="tk">Tóquio</button>
+    <button class="time" data-time="fr">Frankfurt</button>
+  </div>
+</section>
+
+<section class="tela" id="tela-corrida" hidden>
+  <div class="topo">
+    <span class="nome-time" id="nome-time"></span>
+    <span class="tempo" id="tempo"></span>
+  </div>
+  <p class="aviso" id="aviso" role="status"></p>
+  <button class="botao" id="botao" disabled>
+    <span id="rotulo-botao">AGUARDE</span>
+    <small id="meus-toques"></small>
+  </button>
+  <button class="trocar" id="trocar">Trocar de time</button>
+</section>
+
+<script>
+  const NOMES = { sp: "São Paulo", va: "Virgínia", tk: "Tóquio", fr: "Frankfurt" };
+
+  // A regra que faz a demo aguentar a sala: os toques ficam acumulados aqui e
+  // saem em um único POST por segundo. Nunca uma requisição por toque.
+  const INTERVALO_ENVIO_MS = 1000;
+  const INTERVALO_STATUS_MS = 2000;
+  const MAX_POR_ENVIO = 50;
+  const TEMPO_LIMITE_MS = 5000;
+
+  const el = (id) => document.getElementById(id);
+
+  let timeEscolhido = null;
+  let status = "waiting";
+  let terminaEm = 0;       // hora local em que a rodada acaba
+  let pendentes = 0;       // toques ainda não confirmados pela API
+  let meusToques = 0;
+  let enviando = false;
+  let consultando = false;
+
+  // ------------------------------------------------------------- escolha do time
+
+  function lerTimeSalvo() {
+    try { return localStorage.getItem("time"); } catch { return null; }
+  }
+
+  function salvarTime(valor) {
+    try {
+      if (valor) localStorage.setItem("time", valor);
+      else localStorage.removeItem("time");
+    } catch { /* navegação privada: o time vale só até recarregar a página */ }
+  }
+
+  function escolherTime(id) {
+    timeEscolhido = id;
+    salvarTime(id);
+    el("nome-time").textContent = NOMES[id];
+    el("tela-times").hidden = true;
+    el("tela-corrida").hidden = false;
+    desenhar();
+    consultarStatus();
+  }
+
+  document.querySelectorAll(".time").forEach((botao) => {
+    botao.addEventListener("click", () => escolherTime(botao.dataset.time));
+  });
+
+  el("trocar").addEventListener("click", () => {
+    timeEscolhido = null;
+    pendentes = 0;
+    salvarTime(null);
+    el("tela-corrida").hidden = true;
+    el("tela-times").hidden = false;
+  });
+
+  // ------------------------------------------------------------------ desenho
+
+  function segundosRestantes() {
+    return Math.max(0, Math.ceil((terminaEm - Date.now()) / 1000));
+  }
+
+  function desenhar() {
+    const correndo = status === "running";
+    el("botao").disabled = !correndo;
+    el("rotulo-botao").textContent = correndo ? "TOQUE!" : status === "finished" ? "FIM" : "AGUARDE";
+    el("tempo").textContent = correndo ? segundosRestantes() + " s" : "";
+    el("meus-toques").textContent = meusToques ? meusToques + " toques" : "";
+    // Some durante a corrida, para ninguém trocar de time sem querer.
+    el("trocar").hidden = correndo;
+
+    if (correndo) el("aviso").textContent = "Vai, vai, vai!";
+    else if (status === "finished") el("aviso").textContent = "A rodada acabou. Olhe o telão!";
+    else el("aviso").textContent = "A rodada ainda não começou. Fique de olho no telão.";
+  }
+
+  function mudarStatus(novo, segundos) {
+    if (novo === "running" && status !== "running") {
+      meusToques = 0;
+      pendentes = 0;
+    }
+    status = novo;
+    if (novo === "running") terminaEm = Date.now() + segundos * 1000;
+    desenhar();
+  }
+
+  // ------------------------------------------------------------------ o botão
+
+  // pointerdown responde na hora e conta cada dedo; "click" perderia toques rápidos.
+  el("botao").addEventListener("pointerdown", (evento) => {
+    evento.preventDefault();
+    if (status !== "running") return;
+    pendentes += 1;
+    meusToques += 1;
+    el("meus-toques").textContent = meusToques + " toques";
+    el("botao").classList.add("pressionado");
+    // O iPhone não tem navigator.vibrate; nele o retorno é só visual.
+    if (navigator.vibrate) navigator.vibrate(10);
+  });
+
+  ["pointerup", "pointercancel"].forEach((nome) => {
+    el("botao").addEventListener(nome, () => el("botao").classList.remove("pressionado"));
+  });
+
+  // ------------------------------------------------------------------ a rede
+
+  async function chamar(caminho, opcoes) {
+    const controle = new AbortController();
+    const relogio = setTimeout(() => controle.abort(), TEMPO_LIMITE_MS);
+    try {
+      return await fetch(caminho, { ...opcoes, signal: controle.signal });
+    } finally {
+      clearTimeout(relogio);
+    }
+  }
+
+  async function enviarToques() {
+    if (enviando || pendentes === 0 || !timeEscolhido) return;
+    enviando = true;
+    const count = Math.min(pendentes, MAX_POR_ENVIO);
+    try {
+      const resposta = await chamar("/tap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ team: timeEscolhido, count }),
+      });
+      if (resposta.ok) {
+        const dados = await resposta.json();
+        pendentes -= count;
+        // A API tem o relógio oficial: corrige o local se ele se afastou.
+        if (status === "running" && Math.abs(segundosRestantes() - dados.secondsLeft) > 2) {
+          terminaEm = Date.now() + dados.secondsLeft * 1000;
+        }
+      } else if (resposta.status === 409) {
+        // Rodada encerrada: estes toques chegaram tarde demais e não valem mais.
+        pendentes = 0;
+        await consultarStatus();
+      }
+      // Qualquer outro erro (503, 429...): os toques continuam em "pendentes"
+      // e vão no próximo envio. Nada se perde se a rede falhar por um instante.
+    } catch {
+      // Sem rede: mesma coisa, tenta de novo no próximo segundo.
+    } finally {
+      enviando = false;
+    }
+  }
+
+  async function consultarStatus() {
+    if (consultando) return;
+    consultando = true;
+    try {
+      const resposta = await chamar("/state");
+      if (resposta.ok) {
+        const dados = await resposta.json();
+        mudarStatus(dados.status, dados.secondsLeft);
+      }
+    } catch {
+      // Sem rede: mantém o que está na tela e tenta de novo depois.
+    } finally {
+      consultando = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- os relógios
+
+  // Atraso aleatório: se todos enviassem no mesmo milissegundo, a API receberia
+  // 100 requisições juntas por segundo em vez de 100 espalhadas ao longo dele.
+  setTimeout(() => setInterval(enviarToques, INTERVALO_ENVIO_MS), Math.random() * INTERVALO_ENVIO_MS);
+
+  // Durante a corrida, a resposta do /tap já traz o tempo restante. O /state só é
+  // consultado fora da corrida, com a tela visível, para descobrir a largada.
+  setTimeout(() => {
+    setInterval(() => {
+      if (timeEscolhido && status !== "running" && !document.hidden) consultarStatus();
+    }, INTERVALO_STATUS_MS);
+  }, Math.random() * INTERVALO_STATUS_MS);
+
+  // O relógio local encerra a rodada mesmo para quem parou de tocar.
+  setInterval(() => {
+    if (status !== "running") return;
+    if (segundosRestantes() === 0) mudarStatus("finished", 0);
+    else desenhar();
+  }, 250);
+
+  const salvo = lerTimeSalvo();
+  if (salvo && NOMES[salvo]) escolherTime(salvo);
+</script>
+</body>
+</html>

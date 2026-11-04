@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<script>
+  // Preços em dólar, região us-east-1 (N. Virgínia), sem contar o nível gratuito.
+  // Consultados em 2026-11-04 nos exemplos de cálculo das páginas oficiais:
+  //   https://aws.amazon.com/api-gateway/pricing/
+  //   https://aws.amazon.com/lambda/pricing/
+  //   https://aws.amazon.com/dynamodb/pricing/on-demand/
+  const PRECO_HTTP_API_POR_MILHAO = 1.00;           // primeiros 300 milhões, até 512 KB por requisição
+  const PRECO_LAMBDA_POR_MILHAO = 0.20;             // cobrança por invocação
+  const PRECO_LAMBDA_POR_GB_SEGUNDO = 0.0000166667; // arquitetura x86
+  const PRECO_DYNAMODB_ESCRITA_POR_MILHAO = 0.625;  // on-demand, classe Standard
+
+  const MEMORIA_LAMBDA_GB = 0.25;  // 256 MB
+  // Suposição: troque pela duração média real que o CloudWatch mostrar na véspera.
+  const DURACAO_MEDIA_LAMBDA_S = 0.03;
+
+  // Cada requisição passa uma vez pelo API Gateway e pela Lambda e faz uma escrita
+  // no DynamoDB. Ficam de fora o Beanstalk (cobrado por hora, não por rodada), o
+  // Bedrock e as leituras do /state, que somam frações de centavo.
+  function custoEstimado(requisicoes) {
+    const custoPorRequisicao =
+      PRECO_HTTP_API_POR_MILHAO / 1e6 +
+      PRECO_LAMBDA_POR_MILHAO / 1e6 +
+      MEMORIA_LAMBDA_GB * DURACAO_MEDIA_LAMBDA_S * PRECO_LAMBDA_POR_GB_SEGUNDO +
+      PRECO_DYNAMODB_ESCRITA_POR_MILHAO / 1e6;
+    return requisicoes * custoPorRequisicao;
+  }
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corrida na Nuvem</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* A noite do mapa, as janelas de JRPG e o ouro */
+    --noite-1: #120E3C;
+    --noite-2: #1C1660;
+    --noite-3: #2A1F80;
+    --noite-4: #3B2A97;
+    --janela-topo: #2B3FD0;
+    --janela-base: #141C78;
+    --contorno: #0C0830;
+    --branco: #F7F5FF;
+    --apagado: #C6C5F2;
+    --ouro: #FFC933;
+    --laranja: #FF9900;
+    --erro: #FFB4B4;
+
+    /* O "pixel" de toda a interface: bordas e sombras andam nesta unidade */
+    --px: clamp(3px, 0.24vw, 6px);
+    --altura-sprite: 6.4vh;
+
+    --fonte-jogo: "Press Start 2P", "Courier New", monospace;
+    --fonte-texto: "VT323", "Courier New", monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  [hidden] { display: none !important; }
+
+  body {
+    /* Faixas duras no lugar de um degradê suave, como nos jogos de 16 bits */
+    background: linear-gradient(
+      var(--noite-1) 0 34%,
+      var(--noite-2) 34% 62%,
+      var(--noite-3) 62% 86%,
+      var(--noite-4) 86%
+    );
+    color: var(--branco);
+    font-family: var(--fonte-texto);
+    font-synthesis: none; /* negrito falso borraria os pixels */
+    display: grid;
+    grid-template-rows: auto 1fr auto auto;
+    gap: 1.8vh;
+    height: 100vh;
+    padding: 1.8vh 2.2vw;
+    overflow: hidden;
+  }
+
+  /* A janela clássica: a borda sai de sombras e deixa os cantos em degrau */
+  .janela {
+    background: linear-gradient(var(--janela-topo), var(--janela-base));
+    box-shadow:
+      calc(var(--px) * -1) 0 0 var(--branco),
+      var(--px) 0 0 var(--branco),
+      0 calc(var(--px) * -1) 0 var(--branco),
+      0 var(--px) 0 var(--branco),
+      calc(var(--px) * -2) 0 0 var(--contorno),
+      calc(var(--px) * 2) 0 0 var(--contorno),
+      0 calc(var(--px) * -2) 0 var(--contorno),
+      0 calc(var(--px) * 2) 0 var(--contorno);
+  }
+
+  /* Cabeçalho */
+  header { display: flex; justify-content: space-between; align-items: center; gap: 2vw; }
+  h1 {
+    font: 400 clamp(20px, 3vw, 62px) / 1.2 var(--fonte-jogo);
+    color: var(--ouro);
+    text-shadow:
+      var(--px) var(--px) 0 var(--laranja),
+      calc(var(--px) * 2) calc(var(--px) * 2) 0 var(--contorno);
+  }
+  #situacao { font-size: clamp(20px, 2.3vw, 46px); margin-top: 0.8vh; }
+  #relogio { display: flex; align-items: baseline; gap: 1vw; padding: 0.9vh 1.2vw; }
+  #relogio span { font-size: clamp(18px, 1.9vw, 38px); color: var(--apagado); }
+  #tempo {
+    font: 400 clamp(32px, 4.4vw, 90px) / 1 var(--fonte-jogo);
+    min-width: 2ch;
+    text-align: right;
+  }
+  #tempo.fim-proximo { color: var(--ouro); }
+
+  /* Área central */
+  main {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr minmax(260px, 29vw);
+    gap: 2.4vw;
+    min-height: 0;
+  }
+
+  /* A arena */
+  #arena {
+    position: relative;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 0.8vh;
+    min-height: 0;
+    /* Espaço para a faixa quadriculada de chegada */
+    padding-right: 1.8vw;
+  }
+  #arena::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 1.2vw;
+    background: conic-gradient(var(--branco) 25%, var(--contorno) 0 50%, var(--branco) 0 75%, var(--contorno) 0) 0 0 / 1.2vw 1.2vw;
+  }
+  .nuvem { position: absolute; opacity: 0.1; pointer-events: none; }
+  .nuvem-1 { width: 20vw; top: 6%; left: 34%; }
+  .nuvem-2 { width: 14vw; top: 44%; left: 62%; }
+  .nuvem-3 { width: 17vw; top: 72%; left: 14%; }
+
+  #fase {
+    position: relative;
+    display: flex;
+    justify-content: space-between;
+    font-size: clamp(18px, 1.9vw, 38px);
+    color: var(--apagado);
+  }
+  #fase.subiu #numero-fase { animation: subiu-de-fase 1s steps(4); }
+  #numero-fase { color: var(--ouro); display: inline-block; }
+  @keyframes subiu-de-fase {
+    0%, 50% { transform: scale(1.5); }
+    25%, 75% { transform: scale(1); }
+  }
+
+  #pistas { position: relative; display: grid; grid-template-rows: repeat(4, 1fr); gap: 0.6vh; min-height: 0; }
+  .pista { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+  .placa { display: flex; align-items: baseline; gap: 1vw; }
+  .nome { font: 400 clamp(15px, 1.65vw, 34px) / 1.2 var(--fonte-jogo); }
+  .regiao { font-size: clamp(16px, 1.6vw, 32px); color: var(--apagado); }
+  .pontos {
+    margin-left: auto;
+    font: 400 clamp(20px, 2.5vw, 52px) / 1.1 var(--fonte-jogo);
+    text-shadow: var(--px) var(--px) 0 var(--contorno);
+  }
+  .pista.lider .pontos { color: var(--ouro); }
+
+  .trilha { position: relative; min-height: var(--altura-sprite); }
+  .medidor {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1.9vh;
+    background: var(--contorno);
+    outline: var(--px) solid var(--branco);
+  }
+  .carga {
+    height: 100%;
+    width: calc(var(--p, 0) * 100%);
+    /* A faixa clara em cima dá o brilho de medidor de jogo antigo */
+    background: linear-gradient(var(--cor-clara) 0 34%, var(--cor) 34%);
+    transition: width 0.9s linear;
+  }
+  .heroi {
+    position: absolute;
+    bottom: calc(1.9vh + var(--px));
+    /* De 0 a 1: o herói nunca passa da faixa de chegada */
+    left: calc(var(--p, 0) * (100% - var(--altura-sprite) * 12 / 14));
+    height: var(--altura-sprite);
+    aspect-ratio: 12 / 14;
+    transition: left 0.9s linear;
+  }
+  .sprite { display: block; width: 100%; height: 100%; overflow: visible; }
+  .coroa { display: none; position: absolute; left: 12%; bottom: 100%; width: 76%; }
+  .pista.lider .coroa { display: block; }
+
+  /* O herói só corre com a rodada valendo */
+  .pernas-abertas { visibility: hidden; }
+  body[data-status="running"] .pernas-abertas { animation: passo-a 0.34s steps(1) infinite; }
+  body[data-status="running"] .pernas-juntas { animation: passo-b 0.34s steps(1) infinite; }
+  @keyframes passo-a { 0% { visibility: visible; } 50% { visibility: hidden; } }
+  @keyframes passo-b { 0% { visibility: hidden; } 50% { visibility: visible; } }
+
+  /* Os toques do último segundo saltam do herói como números de dano */
+  .dano {
+    position: absolute;
+    /* À direita do herói, para não cobrir a coroa do líder */
+    left: 115%;
+    bottom: 25%;
+    font: 400 clamp(13px, 1.3vw, 28px) / 1 var(--fonte-jogo);
+    color: var(--branco);
+    text-shadow:
+      var(--px) 0 0 var(--contorno),
+      calc(var(--px) * -1) 0 0 var(--contorno),
+      0 var(--px) 0 var(--contorno),
+      0 calc(var(--px) * -1) 0 var(--contorno);
+    white-space: nowrap;
+    pointer-events: none;
+    animation: dano 0.9s steps(9) forwards;
+  }
+  @keyframes dano {
+    0% { transform: translateY(40%); opacity: 1; }
+    30% { transform: translateY(-70%); opacity: 1; }
+    100% { transform: translateY(-40%); opacity: 0; }
+  }
+
+  /* Painel lateral */
+  aside { display: flex; flex-direction: column; gap: 2.2vh; min-height: 0; }
+  #caixa-qr {
+    flex: 1;
+    min-height: 0;
+    background: #FFFFFF;
+    color: var(--contorno);
+    padding: 1.2vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6vh;
+    text-align: center;
+    box-shadow:
+      calc(var(--px) * -1) 0 0 var(--contorno),
+      var(--px) 0 0 var(--contorno),
+      0 calc(var(--px) * -1) 0 var(--contorno),
+      0 var(--px) 0 var(--contorno);
+  }
+  #qr img, #qr canvas { display: block; }
+  #url-jogador { font-size: clamp(14px, 1.25vw, 26px); overflow-wrap: anywhere; }
+  #totais { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4vw; }
+  .total { padding: 1vh 0.9vw; min-width: 0; }
+  .total span { display: block; font-size: clamp(17px, 1.6vw, 32px); color: var(--apagado); }
+  .total strong {
+    display: block;
+    margin-top: 0.5vh;
+    font: 400 clamp(16px, 1.75vw, 36px) / 1.2 var(--fonte-jogo);
+  }
+
+  /* Caixa de diálogo do locutor */
+  #locutor { position: relative; padding: 1.9vh 1.6vw 1.1vh; min-height: 9.5vh; display: flex; align-items: center; }
+  #nome-locutor {
+    position: absolute;
+    top: -1.5vh;
+    left: 1.4vw;
+    padding: 0.4vh 0.8vw;
+    background: var(--contorno);
+    color: var(--ouro);
+    font: 400 clamp(12px, 1.05vw, 22px) / 1.2 var(--fonte-jogo);
+  }
+  #fala { font-size: clamp(23px, 2.8vw, 56px); line-height: 1.2; max-width: 72ch; }
+  #locutor.vazio #fala { color: var(--apagado); }
+  #continua { display: none; margin-left: 0.6vw; color: var(--ouro); animation: pisca 0.8s steps(1) infinite; }
+  #locutor.terminou #continua { display: inline; }
+  @keyframes pisca { 50% { visibility: hidden; } }
+  .so-leitor {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  /* Tela de vitória */
+  #resultado {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 4vw;
+    padding: 3vh 5vw;
+  }
+  #herois-vencedores { display: flex; gap: 1.5vw; }
+  #herois-vencedores .vencedor {
+    width: 15vh;
+    animation: pulo-da-vitoria 0.7s steps(4) infinite alternate;
+  }
+  #herois-vencedores .pernas-abertas { visibility: visible; animation: none; }
+  #herois-vencedores .pernas-juntas { visibility: hidden; animation: none; }
+  @keyframes pulo-da-vitoria { to { transform: translateY(-3vh); } }
+  #rotulo-vencedor { font: 400 clamp(16px, 1.9vw, 40px) / 1.2 var(--fonte-jogo); color: var(--ouro); }
+  #vencedor { font: 400 clamp(26px, 4vw, 84px) / 1.25 var(--fonte-jogo); margin: 1.6vh 0 3vh; }
+  #numeros { display: grid; gap: 1.2vh; max-width: 50vw; }
+  #numeros div {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 2vw;
+    font-size: clamp(21px, 2.5vw, 50px);
+  }
+  #numeros strong { font: 400 clamp(17px, 2.1vw, 44px) / 1.2 var(--fonte-jogo); white-space: nowrap; }
+  #nota-custo { margin-top: 2.2vh; font-size: clamp(17px, 1.6vw, 32px); color: var(--apagado); }
+
+  /* Comandos */
+  footer { display: flex; align-items: center; gap: 1.2vw; flex-wrap: wrap; }
+  button, input { font-family: var(--fonte-texto); font-size: clamp(18px, 1.8vw, 36px); padding: 0.9vh 1.2vw; }
+  button { border: 0; cursor: pointer; color: var(--branco); }
+  button::before { content: "\25B6\00A0"; color: var(--ouro); visibility: hidden; }
+  button:hover:not(:disabled)::before, button:focus-visible::before { visibility: visible; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  input {
+    background: var(--contorno);
+    color: var(--branco);
+    border: var(--px) solid var(--apagado);
+    width: 17vw;
+    min-width: 160px;
+  }
+  input::placeholder { color: var(--apagado); }
+  button:focus-visible, input:focus-visible { outline: var(--px) solid var(--ouro); outline-offset: calc(var(--px) * 2); }
+  #mensagem { font-size: clamp(18px, 1.8vw, 36px); color: var(--erro); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .carga, .heroi { transition: none; }
+    #herois-vencedores .vencedor, #continua, #fase.subiu #numero-fase { animation: none; }
+    body[data-status="running"] .pernas-abertas { animation: none; }
+    body[data-status="running"] .pernas-juntas { animation: none; }
+  }
+</style>
+</head>
+<body data-status="waiting">
+
+<header>
+  <div>
+    <h1>Corrida na Nuvem</h1>
+    <p id="situacao" role="status">Conectando...</p>
+  </div>
+  <div id="relogio" class="janela">
+    <span>Tempo</span>
+    <div id="tempo">60</div>
+  </div>
+</header>
+
+<main>
+  <section id="arena" aria-label="Placar dos times">
+    <div id="fase">
+      <span id="numero-fase">Fase 1</span>
+      <span id="meta-fase">Chegada em 100 toques</span>
+    </div>
+    <div id="pistas"></div>
+  </section>
+
+  <aside>
+    <div id="caixa-qr">
+      <div id="qr"></div>
+      <div id="url-jogador"></div>
+    </div>
+    <div id="totais">
+      <div class="total janela"><span>Toques</span><strong id="total-toques">0</strong></div>
+      <div class="total janela"><span>Requisições</span><strong id="total-requisicoes">0</strong></div>
+    </div>
+  </aside>
+
+  <section id="resultado" class="janela" hidden>
+    <div id="herois-vencedores"></div>
+    <div>
+      <p id="rotulo-vencedor">Vitória!</p>
+      <p id="vencedor"></p>
+      <div id="numeros">
+        <div><span>Toques</span><strong id="final-toques">0</strong></div>
+        <div><span>Requisições</span><strong id="final-requisicoes">0</strong></div>
+        <div><span>Ouro gasto</span><strong id="final-custo">US$ 0,0000</strong></div>
+      </div>
+      <p id="nota-custo">Custo estimado de API Gateway, Lambda e DynamoDB, sem o nível gratuito</p>
+    </div>
+  </section>
+</main>
+
+<div id="locutor" class="janela vazio">
+  <span id="nome-locutor">Locutor</span>
+  <p><span id="fala" aria-hidden="true"></span><span id="continua" aria-hidden="true">&#9660;</span></p>
+  <span id="fala-leitor" class="so-leitor" aria-live="polite"></span>
+</div>
+
+<footer>
+  <input id="token" type="password" placeholder="Token de admin" autocomplete="off" aria-label="Token de admin">
+  <button id="largada" class="janela">Largada</button>
+  <button id="zerar" class="janela">Zerar</button>
+  <span id="mensagem" role="alert"></span>
+</footer>
+
+<script src="/config.js"></script>
+<script src="/herois.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+  const IDS_DOS_TIMES = Object.keys(HEROIS);
+  const INTERVALO_PLACAR_MS = 1000;
+  const TEMPO_LIMITE_MS = 8000;
+  const MS_POR_LETRA = 28;
+  const FALA_VAZIA = "O locutor entra em cena depois da largada.";
+  const SITUACOES = {
+    waiting: "Aponte a câmera para o QR e escolha sua Região",
+    running: "Valendo! Toque o mais rápido que puder",
+    finished: "Fim da rodada",
+  };
+
+  const API_URL = window.API_URL || "";
+  const SEM_ANIMACAO = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const el = (id) => document.getElementById(id);
+  const inteiro = new Intl.NumberFormat("pt-BR");
+  const dolar = new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4,
+  });
+
+  // Coloca as nuvens no céu da arena e uma pista para cada herói.
+  for (const numero of [1, 2, 3]) {
+    el("arena").insertAdjacentHTML("afterbegin", spriteDaNuvem(`nuvem nuvem-${numero}`));
+  }
+  for (const id of IDS_DOS_TIMES) {
+    const heroi = HEROIS[id];
+    el("pistas").insertAdjacentHTML("beforeend", `
+      <div class="pista" id="pista-${id}"
+           style="--cor:${heroi.cor}; --cor-clara:${heroi.corClara}">
+        <div class="placa">
+          <span class="nome">${heroi.nome}</span>
+          <span class="regiao">${heroi.regiao}</span>
+          <span class="pontos" id="pontos-${id}">0</span>
+        </div>
+        <div class="trilha">
+          <div class="medidor"><div class="carga"></div></div>
+          <div class="heroi" id="heroi-${id}">${spriteDaCoroa()}${spriteDoHeroi(id)}</div>
+        </div>
+      </div>`);
+  }
+
+  // ------------------------------------------------------------------ o QR
+
+  function desenharQr() {
+    const urlJogador = API_URL + "/";
+    el("url-jogador").textContent = API_URL ? urlJogador : "API_URL não configurada";
+    if (!API_URL || !window.QRCode) return; // sem o QR, o endereço continua na tela
+    const caixa = el("caixa-qr");
+    const lado = Math.floor(Math.min(caixa.clientWidth - 24, caixa.clientHeight - 56));
+    new QRCode(el("qr"), {
+      text: urlJogador,
+      width: lado,
+      height: lado,
+      colorDark: "#0C0830",
+      colorLight: "#FFFFFF",
+      correctLevel: QRCode.CorrectLevel.M,
+    });
+  }
+
+  // ---------------------------------------------------------------- o placar
+
+  // A chegada anda em degraus (100, 200, 500, 1000...). Quando o líder alcança a
+  // faixa, a rodada entra em uma nova fase e todos recuam na pista.
+  function calcularFase(lider) {
+    let numero = 1;
+    let chegada = 100;
+    while (chegada < lider) {
+      chegada *= String(chegada)[0] === "2" ? 2.5 : 2;
+      numero += 1;
+    }
+    return { numero, chegada };
+  }
+
+  let faseAtual = 1;
+  let placarAnterior = null;
+
+  function desenharFase(fase) {
+    el("numero-fase").textContent = `Fase ${fase.numero}`;
+    el("meta-fase").textContent = `Chegada em ${inteiro.format(fase.chegada)} toques`;
+    if (fase.numero > faseAtual && !SEM_ANIMACAO) {
+      el("fase").classList.remove("subiu");
+      void el("fase").offsetWidth; // reinicia a animação
+      el("fase").classList.add("subiu");
+    }
+    faseAtual = fase.numero;
+  }
+
+  function mostrarDano(id, quantidade) {
+    if (SEM_ANIMACAO || quantidade <= 0) return;
+    const dano = document.createElement("span");
+    dano.className = "dano";
+    dano.textContent = "+" + inteiro.format(quantidade);
+    dano.addEventListener("animationend", () => dano.remove());
+    el(`heroi-${id}`).append(dano);
+  }
+
+  function idsDosLideres(placar) {
+    const maior = Math.max(...IDS_DOS_TIMES.map((id) => placar[id]));
+    return maior === 0 ? [] : IDS_DOS_TIMES.filter((id) => placar[id] === maior);
+  }
+
+  function desenharPlacar(estado) {
+    const placar = estado.scores;
+    const maior = Math.max(...IDS_DOS_TIMES.map((id) => placar[id]));
+    const fase = calcularFase(maior);
+    document.body.dataset.status = estado.status;
+    desenharFase(fase);
+
+    for (const id of IDS_DOS_TIMES) {
+      const pontos = placar[id];
+      const pista = el(`pista-${id}`);
+      pista.style.setProperty("--p", pontos / fase.chegada);
+      pista.classList.toggle("lider", maior > 0 && pontos === maior);
+      el(`pontos-${id}`).textContent = inteiro.format(pontos);
+      if (estado.status === "running" && placarAnterior) {
+        mostrarDano(id, pontos - placarAnterior[id]);
+      }
+    }
+    placarAnterior = placar;
+
+    el("tempo").textContent = estado.status === "waiting" ? "60" : estado.secondsLeft;
+    el("tempo").classList.toggle("fim-proximo", estado.status === "running" && estado.secondsLeft <= 10);
+    el("situacao").textContent = SITUACOES[estado.status];
+    el("total-toques").textContent = inteiro.format(estado.totalTaps);
+    el("total-requisicoes").textContent = inteiro.format(estado.requests);
+    el("largada").disabled = estado.status === "running";
+
+    narrar(estado.phrase);
+    // Avisa quando a frase é pronta: a sala não deve achar que ela veio do Bedrock.
+    el("nome-locutor").textContent = estado.phraseSource === "reserva" ? "Locutor de reserva" : "Locutor";
+    desenharResultado(estado);
+  }
+
+  let vencedoresNaTela = null;
+
+  function desenharResultado(estado) {
+    el("resultado").hidden = estado.status !== "finished";
+    if (estado.status !== "finished") {
+      vencedoresNaTela = null;
+      return;
+    }
+
+    el("final-toques").textContent = inteiro.format(estado.totalTaps);
+    el("final-requisicoes").textContent = inteiro.format(estado.requests);
+    el("final-custo").textContent = dolar.format(custoEstimado(estado.requests));
+
+    // Só redesenha quando muda, para não reiniciar o pulo dos heróis a cada segundo.
+    const lideres = idsDosLideres(estado.scores);
+    const chave = lideres.join();
+    if (chave === vencedoresNaTela) return;
+    vencedoresNaTela = chave;
+
+    const nomes = lideres.map((id) => HEROIS[id].nome);
+    el("rotulo-vencedor").textContent = nomes.length === 1 ? "Vitória!" : nomes.length ? "Empate!" : "Fim de jogo";
+    el("vencedor").textContent = nomes.length ? nomes.join(" e ") : "Ninguém tocou";
+    el("herois-vencedores").innerHTML = lideres
+      .map((id) => `<div class="vencedor">${spriteDoHeroi(id)}</div>`)
+      .join("");
+  }
+
+  // ---------------------------------------------------------------- o locutor
+
+  let falaNaTela = null;
+  let relogioDaFala = null;
+
+  function narrar(frase) {
+    if (frase === falaNaTela) return;
+    falaNaTela = frase;
+    clearInterval(relogioDaFala);
+
+    const locutor = el("locutor");
+    locutor.classList.toggle("vazio", !frase);
+    locutor.classList.remove("terminou");
+
+    const texto = frase || FALA_VAZIA;
+    el("fala-leitor").textContent = texto;
+
+    if (!frase || SEM_ANIMACAO) {
+      el("fala").textContent = texto;
+      locutor.classList.toggle("terminou", Boolean(frase));
+      return;
+    }
+
+    // Letra por letra, como nas caixas de diálogo dos RPGs.
+    let letras = 0;
+    el("fala").textContent = "";
+    relogioDaFala = setInterval(() => {
+      letras += 1;
+      el("fala").textContent = texto.slice(0, letras);
+      if (letras >= texto.length) {
+        clearInterval(relogioDaFala);
+        locutor.classList.add("terminou");
+      }
+    }, MS_POR_LETRA);
+  }
+
+  // ------------------------------------------------------------------ a rede
+
+  async function chamar(caminho, opcoes) {
+    const controle = new AbortController();
+    const relogio = setTimeout(() => controle.abort(), TEMPO_LIMITE_MS);
+    try {
+      return await fetch(API_URL + caminho, { ...opcoes, signal: controle.signal });
+    } finally {
+      clearTimeout(relogio);
+    }
+  }
+
+  let atualizando = false;
+
+  async function atualizar() {
+    // A chamada que gera a frase do locutor demora mais: nunca empilha pedidos.
+    if (atualizando || !API_URL) return;
+    atualizando = true;
+    try {
+      const resposta = await chamar("/state");
+      if (!resposta.ok) throw new Error("HTTP " + resposta.status);
+      desenharPlacar(await resposta.json());
+      if (el("mensagem").dataset.origem === "rede") mostrarMensagem("");
+    } catch {
+      // O último placar continua na tela; o próximo segundo tenta de novo.
+      mostrarMensagem("Sem resposta da API. Verifique a rede ou o CORS.", "rede");
+    } finally {
+      atualizando = false;
+    }
+  }
+
+  function mostrarMensagem(texto, origem = "") {
+    el("mensagem").textContent = texto;
+    el("mensagem").dataset.origem = origem;
+  }
+
+  // ----------------------------------------------------------------- os botões
+
+  // O token é digitado aqui e nunca vai para o HTML: a página é pública e está no
+  // telão. O sessionStorage evita redigitar ao recarregar a página.
+  function lerToken() {
+    try { return sessionStorage.getItem("adminToken") || ""; } catch { return ""; }
+  }
+
+  function salvarToken(valor) {
+    try { sessionStorage.setItem("adminToken", valor); } catch { /* vale até recarregar */ }
+  }
+
+  el("token").value = lerToken();
+  el("token").addEventListener("input", () => salvarToken(el("token").value));
+
+  async function comandoAdmin(caminho) {
+    mostrarMensagem("");
+    try {
+      const resposta = await chamar(caminho, {
+        method: "POST",
+        headers: { "x-admin-token": el("token").value },
+      });
+      if (resposta.status === 401) mostrarMensagem("Token de admin inválido.");
+      else if (resposta.status === 409) mostrarMensagem("A rodada já está em andamento.");
+      else if (!resposta.ok) mostrarMensagem("A API respondeu com erro " + resposta.status + ".");
+      else placarAnterior = null; // placar novo: não mostra "dano" da rodada anterior
+    } catch {
+      mostrarMensagem("Sem resposta da API. Verifique a rede ou o CORS.");
+    }
+    atualizar();
+  }
+
+  el("largada").addEventListener("click", () => comandoAdmin("/admin/start"));
+  el("zerar").addEventListener("click", () => comandoAdmin("/admin/reset"));
+
+  // ------------------------------------------------------------------ início
+
+  if (!API_URL) mostrarMensagem("Defina a variável API_URL no ambiente do Beanstalk.");
+  narrar("");
+  desenharQr();
+  atualizar();
+  setInterval(atualizar, INTERVALO_PLACAR_MS);
+</script>
+</body>
+</html>
